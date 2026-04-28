@@ -6,7 +6,7 @@ type Config struct {
 }
 
 type Delays struct {
-	GlobalDelayMs *int           `json:"global_delay_ms,omitempty"`
+	GlobalDelayMs *int           `json:"global_ms,omitempty"`
 	Patterns      []PatternDelay `json:"patterns"`
 }
 
