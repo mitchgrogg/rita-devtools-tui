@@ -22,18 +22,38 @@ const (
 	alterationConfirmDeleteAll
 )
 
-type alterationsLoadedMsg struct{ alterations []types.Alteration }
-type alterationAddedMsg struct{}
-type alterationDeletedMsg struct{}
-type allAlterationsDeletedMsg struct{}
+// Every alteration message carries the kind it belongs to: two instances of
+// this model are alive at once and App fans non-key messages out to both.
+type alterationsLoadedMsg struct {
+	kind        types.AlterationKind
+	alterations []types.Alteration
+}
+type alterationAddedMsg struct{ kind types.AlterationKind }
+type alterationDeletedMsg struct{ kind types.AlterationKind }
+type allAlterationsDeletedMsg struct{ kind types.AlterationKind }
+
+func alterationMsgKind(msg tea.Msg) (types.AlterationKind, bool) {
+	switch msg := msg.(type) {
+	case alterationsLoadedMsg:
+		return msg.kind, true
+	case alterationAddedMsg:
+		return msg.kind, true
+	case alterationDeletedMsg:
+		return msg.kind, true
+	case allAlterationsDeletedMsg:
+		return msg.kind, true
+	}
+	return "", false
+}
 
 type AlterationsModel struct {
 	client       *api.Client
+	kind         types.AlterationKind
 	state        alterationState
 	alterations  []types.Alteration
 	cursor       int
 	patternInput textinput.Model
-	statusInput  textinput.Model
+	middleInput  textinput.Model // status code (response) or rewrite URL (request)
 	bodyInput    textinput.Model
 	focusedField int
 	loading      bool
@@ -45,19 +65,25 @@ type AlterationsModel struct {
 	keys         KeyMap
 }
 
-func NewAlterationsModel(client *api.Client, styles Styles, keys KeyMap) AlterationsModel {
+func NewAlterationsModel(client *api.Client, styles Styles, keys KeyMap, kind types.AlterationKind) AlterationsModel {
 	pi := textinput.New()
 	pi.Placeholder = "URL pattern regex"
 	pi.CharLimit = 256
 	pi.SetWidth(60)
 
-	si := textinput.New()
-	si.Placeholder = "status code (e.g. 503)"
-	si.CharLimit = 3
-	si.SetWidth(40)
+	mi := textinput.New()
+	if kind == types.AlterationRequest {
+		mi.Placeholder = "rewrite URL (regex substitution)"
+		mi.CharLimit = 256
+		mi.SetWidth(60)
+	} else {
+		mi.Placeholder = "status code (e.g. 503)"
+		mi.CharLimit = 3
+		mi.SetWidth(40)
+	}
 
 	bi := textinput.New()
-	bi.Placeholder = "response body"
+	bi.Placeholder = string(kind) + " body"
 	bi.CharLimit = 1024
 	bi.SetWidth(60)
 
@@ -66,9 +92,10 @@ func NewAlterationsModel(client *api.Client, styles Styles, keys KeyMap) Alterat
 
 	return AlterationsModel{
 		client:       client,
+		kind:         kind,
 		state:        alterationBrowse,
 		patternInput: pi,
-		statusInput:  si,
+		middleInput:  mi,
 		bodyInput:    bi,
 		spinner:      s,
 		styles:       styles,
@@ -76,11 +103,23 @@ func NewAlterationsModel(client *api.Client, styles Styles, keys KeyMap) Alterat
 	}
 }
 
+// title is the display name for this model's kind, e.g. "Request Alterations".
+func (m AlterationsModel) title() string {
+	if m.kind == types.AlterationRequest {
+		return "Request Alterations"
+	}
+	return "Response Alterations"
+}
+
 func (m AlterationsModel) Init() tea.Cmd {
 	return tea.Batch(m.loadAlterations(), m.spinner.Tick)
 }
 
 func (m AlterationsModel) Update(msg tea.Msg) (AlterationsModel, tea.Cmd) {
+	if kind, ok := alterationMsgKind(msg); ok && kind != m.kind {
+		return m, nil
+	}
+
 	switch msg := msg.(type) {
 	case alterationsLoadedMsg:
 		m.loading = false
@@ -148,11 +187,11 @@ func (m AlterationsModel) handleBrowseKey(msg tea.KeyPressMsg) (AlterationsModel
 	case key.Matches(msg, m.keys.Add):
 		m.state = alterationAdd
 		m.patternInput.SetValue("")
-		m.statusInput.SetValue("")
+		m.middleInput.SetValue("")
 		m.bodyInput.SetValue("")
 		m.focusedField = 0
 		cmd := m.patternInput.Focus()
-		m.statusInput.Blur()
+		m.middleInput.Blur()
 		m.bodyInput.Blur()
 		return m, cmd
 
@@ -190,21 +229,21 @@ func (m AlterationsModel) handleAddKey(msg tea.KeyPressMsg) (AlterationsModel, t
 	case key.Matches(msg, m.keys.Cancel):
 		m.state = alterationBrowse
 		m.patternInput.Blur()
-		m.statusInput.Blur()
+		m.middleInput.Blur()
 		m.bodyInput.Blur()
 		return m, nil
 
 	case key.Matches(msg, m.keys.NextField):
 		m.focusedField = (m.focusedField + 1) % 3
 		m.patternInput.Blur()
-		m.statusInput.Blur()
+		m.middleInput.Blur()
 		m.bodyInput.Blur()
 		var cmd tea.Cmd
 		switch m.focusedField {
 		case 0:
 			cmd = m.patternInput.Focus()
 		case 1:
-			cmd = m.statusInput.Focus()
+			cmd = m.middleInput.Focus()
 		case 2:
 			cmd = m.bodyInput.Focus()
 		}
@@ -212,28 +251,35 @@ func (m AlterationsModel) handleAddKey(msg tea.KeyPressMsg) (AlterationsModel, t
 
 	case key.Matches(msg, m.keys.Confirm):
 		pattern := strings.TrimSpace(m.patternInput.Value())
-		statusStr := strings.TrimSpace(m.statusInput.Value())
+		middle := strings.TrimSpace(m.middleInput.Value())
 		body := m.bodyInput.Value()
 
 		if pattern == "" {
 			m.err = fmt.Errorf("URL pattern cannot be empty")
 			return m, nil
 		}
-		statusCode, err := strconv.Atoi(statusStr)
-		if err != nil || statusCode < 100 || statusCode > 599 {
-			m.err = fmt.Errorf("invalid status code: must be 100-599")
-			return m, nil
+
+		alteration := types.Alteration{URLPattern: pattern, Body: body}
+		if m.kind == types.AlterationRequest {
+			if middle == "" && body == "" {
+				m.err = fmt.Errorf("set a rewrite URL, a body, or both")
+				return m, nil
+			}
+			alteration.RewriteURL = middle
+		} else {
+			statusCode, err := strconv.Atoi(middle)
+			if err != nil || statusCode < 100 || statusCode > 599 {
+				m.err = fmt.Errorf("invalid status code: must be 100-599")
+				return m, nil
+			}
+			alteration.StatusCode = statusCode
 		}
 
 		m.patternInput.Blur()
-		m.statusInput.Blur()
+		m.middleInput.Blur()
 		m.bodyInput.Blur()
 		m.loading = true
-		return m, m.addAlteration(types.Alteration{
-			URLPattern: pattern,
-			StatusCode: statusCode,
-			Body:       body,
-		})
+		return m, m.addAlteration(alteration)
 	}
 
 	var cmd tea.Cmd
@@ -241,7 +287,7 @@ func (m AlterationsModel) handleAddKey(msg tea.KeyPressMsg) (AlterationsModel, t
 	case 0:
 		m.patternInput, cmd = m.patternInput.Update(msg)
 	case 1:
-		m.statusInput, cmd = m.statusInput.Update(msg)
+		m.middleInput, cmd = m.middleInput.Update(msg)
 	case 2:
 		m.bodyInput, cmd = m.bodyInput.Update(msg)
 	}
@@ -267,7 +313,7 @@ func (m AlterationsModel) updateInputs(msg tea.Msg) (AlterationsModel, tea.Cmd) 
 		case 0:
 			m.patternInput, cmd = m.patternInput.Update(msg)
 		case 1:
-			m.statusInput, cmd = m.statusInput.Update(msg)
+			m.middleInput, cmd = m.middleInput.Update(msg)
 		case 2:
 			m.bodyInput, cmd = m.bodyInput.Update(msg)
 		}
@@ -278,7 +324,7 @@ func (m AlterationsModel) updateInputs(msg tea.Msg) (AlterationsModel, tea.Cmd) 
 func (m AlterationsModel) View() string {
 	var b strings.Builder
 
-	b.WriteString(m.styles.Title.Render("Alterations"))
+	b.WriteString(m.styles.Title.Render(m.title()))
 	b.WriteString("\n\n")
 
 	if m.loading {
@@ -288,17 +334,21 @@ func (m AlterationsModel) View() string {
 
 	// Confirm delete all
 	if m.state == alterationConfirmDeleteAll {
-		b.WriteString(m.styles.ErrorText.Render("Delete all alterations? (y/n)"))
+		b.WriteString(m.styles.ErrorText.Render("Delete all " + strings.ToLower(m.title()) + "? (y/n)"))
 		b.WriteString("\n\n")
 	}
 
 	// Add form
 	if m.state == alterationAdd {
-		b.WriteString(m.styles.InputLabel.Render("Add Alteration"))
+		b.WriteString(m.styles.InputLabel.Render("Add " + strings.TrimSuffix(m.title(), "s")))
 		b.WriteString("\n")
 
-		labels := []string{"  URL Pattern: ", "  Status Code: ", "  Body: "}
-		inputs := []string{m.patternInput.View(), m.statusInput.View(), m.bodyInput.View()}
+		middleLabel := "  Status Code: "
+		if m.kind == types.AlterationRequest {
+			middleLabel = "  Rewrite URL: "
+		}
+		labels := []string{"  URL Pattern: ", middleLabel, "  Body: "}
+		inputs := []string{m.patternInput.View(), m.middleInput.View(), m.bodyInput.View()}
 		for i := range 3 {
 			label := labels[i]
 			if i == m.focusedField {
@@ -313,18 +363,14 @@ func (m AlterationsModel) View() string {
 	}
 
 	// Alteration list
-	b.WriteString(m.styles.InputLabel.Render("Response Alterations"))
+	b.WriteString(m.styles.InputLabel.Render(m.title()))
 	b.WriteString("\n")
 	if len(m.alterations) == 0 {
-		b.WriteString(m.styles.HelpStyle.Render("  No alterations configured"))
+		b.WriteString(m.styles.HelpStyle.Render("  No " + strings.ToLower(m.title()) + " configured"))
 		b.WriteString("\n")
 	} else {
 		for i, a := range m.alterations {
-			bodyPreview := m.truncate(a.Body, 30)
-			if bodyPreview == "" {
-				bodyPreview = "(empty)"
-			}
-			line := fmt.Sprintf("  %s → %d %s", m.truncate(a.URLPattern, 40), a.StatusCode, bodyPreview)
+			line := fmt.Sprintf("  %s → %s", m.truncate(a.URLPattern, 40), m.describe(a))
 			if i == m.cursor && m.state == alterationBrowse {
 				b.WriteString(m.styles.SelectedRow.Render("▸ " + line))
 			} else {
@@ -340,6 +386,21 @@ func (m AlterationsModel) View() string {
 	}
 
 	return b.String()
+}
+
+// describe renders the right-hand side of a list row: what the rule does.
+func (m AlterationsModel) describe(a types.Alteration) string {
+	bodyPreview := m.truncate(a.Body, 30)
+	if bodyPreview == "" {
+		bodyPreview = "(empty)"
+	}
+	if m.kind == types.AlterationRequest {
+		if a.RewriteURL != "" {
+			return a.RewriteURL
+		}
+		return "body: " + bodyPreview
+	}
+	return fmt.Sprintf("%d %s", a.StatusCode, bodyPreview)
 }
 
 func (m AlterationsModel) truncate(s string, max int) string {
@@ -368,37 +429,37 @@ func (m AlterationsModel) HelpKeys() []key.Binding {
 
 func (m AlterationsModel) loadAlterations() tea.Cmd {
 	return func() tea.Msg {
-		alts, err := m.client.ListAlterations()
+		alts, err := m.client.ListAlterations(m.kind)
 		if err != nil {
 			return apiErrMsg{err}
 		}
-		return alterationsLoadedMsg{alts}
+		return alterationsLoadedMsg{kind: m.kind, alterations: alts}
 	}
 }
 
 func (m AlterationsModel) addAlteration(a types.Alteration) tea.Cmd {
 	return func() tea.Msg {
-		if err := m.client.AddAlteration(a); err != nil {
+		if err := m.client.AddAlteration(m.kind, a); err != nil {
 			return apiErrMsg{err}
 		}
-		return alterationAddedMsg{}
+		return alterationAddedMsg{kind: m.kind}
 	}
 }
 
 func (m AlterationsModel) deleteAlteration(index int) tea.Cmd {
 	return func() tea.Msg {
-		if err := m.client.RemoveAlteration(index); err != nil {
+		if err := m.client.RemoveAlteration(m.kind, index); err != nil {
 			return apiErrMsg{err}
 		}
-		return alterationDeletedMsg{}
+		return alterationDeletedMsg{kind: m.kind}
 	}
 }
 
 func (m AlterationsModel) deleteAllAlterations() tea.Cmd {
 	return func() tea.Msg {
-		if err := m.client.RemoveAllAlterations(); err != nil {
+		if err := m.client.RemoveAllAlterations(m.kind); err != nil {
 			return apiErrMsg{err}
 		}
-		return allAlterationsDeletedMsg{}
+		return allAlterationsDeletedMsg{kind: m.kind}
 	}
 }

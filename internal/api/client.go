@@ -72,24 +72,28 @@ func (c *Client) RemovePatternDelay(index int) error {
 	return c.doJSON("DELETE", fmt.Sprintf("/api/delays/patterns/%d", index), nil, nil)
 }
 
-func (c *Client) ListAlterations() ([]types.Alteration, error) {
+func (c *Client) ListAlterations(kind types.AlterationKind) ([]types.Alteration, error) {
 	var alts []types.Alteration
-	if err := c.doJSON("GET", "/api/alterations", nil, &alts); err != nil {
+	if err := c.doJSON("GET", alterationsPath(kind), nil, &alts); err != nil {
 		return nil, err
 	}
 	return alts, nil
 }
 
-func (c *Client) AddAlteration(a types.Alteration) error {
-	return c.doJSON("POST", "/api/alterations", a, nil)
+func (c *Client) AddAlteration(kind types.AlterationKind, a types.Alteration) error {
+	return c.doJSON("POST", alterationsPath(kind), a, nil)
 }
 
-func (c *Client) RemoveAllAlterations() error {
-	return c.doJSON("DELETE", "/api/alterations", nil, nil)
+func (c *Client) RemoveAllAlterations(kind types.AlterationKind) error {
+	return c.doJSON("DELETE", alterationsPath(kind), nil, nil)
 }
 
-func (c *Client) RemoveAlteration(index int) error {
-	return c.doJSON("DELETE", fmt.Sprintf("/api/alterations/%d", index), nil, nil)
+func (c *Client) RemoveAlteration(kind types.AlterationKind, index int) error {
+	return c.doJSON("DELETE", fmt.Sprintf("%s/%d", alterationsPath(kind), index), nil, nil)
+}
+
+func alterationsPath(kind types.AlterationKind) string {
+	return "/api/alterations/" + string(kind)
 }
 
 func (c *Client) doJSON(method, path string, reqBody any, respBody any) error {
