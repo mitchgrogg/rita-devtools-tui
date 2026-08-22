@@ -1,6 +1,6 @@
 # rita-devtools-tui
 
-A terminal UI for controlling the rita-mitm REST API - an addon for mitmproxy which runs in [rita-devtools](https://github.com/mitchgrogg/rita-devtools). Manage request delays and response modifications from the comfort of your terminal.
+A terminal UI for controlling the rita-mitm REST API - an addon for mitmproxy which runs in [rita-devtools](https://github.com/mitchgrogg/rita-devtools). Manage request delays and request/response alterations from the comfort of your terminal.
 
 ## Installation
 
@@ -40,7 +40,7 @@ rita-devtools-tui --version
 | Key                 | Action      |
 | ------------------- | ----------- |
 | `tab` / `shift+tab` | Switch tabs |
-| `1` / `2` / `3`     | Jump to tab |
+| `1` - `4`           | Jump to tab |
 | `↑` / `k`           | Move up     |
 | `↓` / `j`           | Move down   |
 | `q` / `ctrl+c`      | Quit        |
@@ -55,7 +55,27 @@ rita-devtools-tui --version
 | `D` | Delete all patterns     |
 | `r` | Refresh                 |
 
-### Alterations Tab
+### Request Alterations Tab
+
+Rewrites outgoing requests before they leave the proxy. Each rule matches a URL
+pattern and sets a rewrite URL (a regex substitution applied to the matched part
+of the URL, so path and query survive), a replacement request body, or both.
+
+Anchor the pattern with `^` when the rewrite URL is a full URL — e.g. pattern
+`^https://api\.prod\.com` with rewrite URL `https://api.staging.com`. An
+unanchored pattern would splice the replacement into the middle of the URL;
+rita-mitm skips such a rewrite and logs a warning instead of applying it.
+
+| Key | Action                     |
+| --- | -------------------------- |
+| `a` | Add alteration             |
+| `d` | Delete selected alteration |
+| `D` | Delete all alterations     |
+| `r` | Refresh                    |
+
+### Response Alterations Tab
+
+Overwrites the status code and/or body of responses whose URL matches the rule.
 
 | Key | Action                     |
 | --- | -------------------------- |
